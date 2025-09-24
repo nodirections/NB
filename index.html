@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Nuit Blanche — MapLibre GL</title>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <!-- Optional PMTiles (vector tiles in a single file you can host anywhere) -->
+  <script src="https://unpkg.com/pmtiles@3.0.6/dist/pmtiles.js"></script>
+  <style>
+    html, body { height:100%; margin:0; }
+    #map { position:fixed; inset:0; }
+    .maplibregl-ctrl button { width:44px; height:44px; } /* bigger touch targets */
+    .popup { max-width: 300px; }
+    .popup h3 { margin:0 0 6px; font-size:18px; }
+    .popup .meta { color:#555; font-size:13px; margin-bottom:6px; }
+    .popup img { width:100%; height:auto; border-radius:8px; margin:6px 0 8px; display:none; }
+    .actions a { display:inline-block; padding:10px 12px; border-radius:10px; border:1px solid #ddd; text-decoration:none; }
+    /* Floating header (optional search/filter later) */
+    .topbar { position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:2; background:#fff; border-radius:12px; box-shadow:0 4px 14px rgba(0,0,0,.15); padding:6px 10px; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; }
+    .topbar b { font-weight:600; }
+  </style>
+</head>
+<body>
+  <div class="topbar"><b>Nuit Blanche</b> • MapLibre GL</div>
+  <div id="map"></div>
+
+  <script>
+    // ====== CONFIG ======
+    // A) FASTEST: raster OSM (no keys, works on GitHub Pages). Comment out B) if you use this.
+    const RASTER_OSM_STYLE = {
+      version: 8,
+      sources: {
+        osm: {
+          type: 'raster',
+          tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+          tileSize: 256,
+          attribution: '© OpenStreetMap contributors'
+        }
+      },
+      layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+    };
+
+    // B) OPTIONAL: true vector tiles with a style.json.
+    // Provide your own style URL (e.g., MapTiler, OpenMapTiles you host, or Carto GL style). Many providers require an API key.
+    // Example: const VECTOR_STYLE_URL = 'https://api.maptiler.com/maps/bright/style.json?key=YOUR_KEY';
+    const USE_VECTOR_STYLE = false; // set to true when you have a style URL
+    const VECTOR_STYLE_URL = '';
+
+    // C) OPTIONAL: PMTiles (single-file vector tiles). Host a .pmtiles file (e.g., on GitHub Releases/Supabase) and use with MapLibre.
+    // Set PMTILES_URL to enable. Requires pmtiles.js script above. Example public dataset: https://protomaps.github.io/PMTiles/protomaps(vector) v3
+    const PMTILES_URL = '';
+
+    // Your exhibits data: either set DATA_URL to a GeoJSON file URL (e.g., Supabase public bucket)
+    // OR leave blank to use the inline sample FeatureCollection below.
+    const DATA_URL = ''; // e.g., 'https://your-supabase-bucket/exhibits.geojson' or 'exhibits.geojson'
+
+    const EXHIBIT_COLOR = '#c2185b';
+    const CLUSTER_POINTS = true;
+
+    // ====== SAMPLE DATA ======
+    const SAMPLE_EXHIBITS = {
+      "type":"FeatureCollection",
+      "features":[
+        {"type":"Feature","properties":{"title":"Illuminated Arches","venue":"Old Market Square","hours":"8pm–2am","category":"Light","url":"https://example.com/a","image":""},"geometry":{"type":"Point","coordinates":[-97.1384,49.8988]}},
+        {"type":"Feature","properties":{"title":"Projection Mapping Jam","venue":"Exchange District","hours":"7pm–1am","category":"Projection","url":"https://example.com/b","image":""},"geometry":{"type":"Point","coordinates":[-97.1421,49.9002]}}
+      ]
+    };
+
+    // ====== MAP INIT ======
+    let map;
+
+    // If using PMTiles, wire a protocol so MapLibre can read it inside style.json sources.
+    if (PMTILES_URL) {
+      const protocol = new pmtiles.Protocol();
+      maplibregl.addProtocol('pmtiles', protocol.tile);
+    }
+
+    async function createMap() {
+      // Pick a style: vector (style URL), PMTiles style, or fallback raster OSM style.
+      let style = RASTER_OSM_STYLE;
+
+      if (USE_VECTOR_STYLE && VECTOR_STYLE_URL) {
+        style = VECTOR_STYLE_URL;
+      } else if (PMTILES_URL) {
+        // Minimal style referencing pmtiles as a vector source
+        style = {
+          version: 8,
+          sources: {
+            protomaps: {
+              type: 'vector',
+              url: `pmtiles://${PMTILES_URL}`
+            }
+          },
+          layers: [
+            // A very basic layer to draw land/water labels depends on tileset schema; this is a placeholder.
+            // You will likely plug in a full style.json that matches your pmtiles schema (e.g., OpenMapTiles).
+            { id: 'proto-fill', type: 'background', paint: { 'background-color':'#f2f2f2' } }
+          ],
+          glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf'
+        };
+      }
+
+      map = new maplibregl.Map({
+        container: 'map',
+        style,
+        center: [-97.1384, 49.8951], // Winnipeg
+        zoom: 13,
+        attributionControl: true,
+        dragRotate: false, // nicer on mobile
+        touchPitch: false
+      });
+
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), 'top-right');
+      map.addControl(new maplibregl.GeolocateControl({ positionOptions: { enableHighAccuracy: true }, trackUserLocation: false }), 'top-right');
+      map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }));
+
+      map.once('load', async () => {
+        const geojson = await loadExhibits();
+        addExhibits(geojson);
+        flyToData(geojson);
+        handleDeepLink();
+      });
+    }
+
+    function safe(s){ return (s||'').toString(); }
+    function popupHtml(p){
+      const img = safe(p.image).trim() ? `<img src="${safe(p.image)}" alt="${safe(p.title)}" onload="this.style.display='block'" />` : '';
+      const link = safe(p.url).trim() ? `<div class="actions"><a href="${p.url}" target="_blank" rel="noopener">Details ↗</a></div>` : '';
+      return `
+        <div class="popup">
+          <h3>${safe(p.title)}</h3>
+          <div class="meta">${safe(p.venue)}${p.hours? ' • '+safe(p.hours):''}${p.category? ' • '+safe(p.category):''}</div>
+          ${img}
+          ${safe(p.description)||''}
+          ${link}
+        </div>`;
+    }
+
+    async function loadExhibits(){
+      if (DATA_URL) {
+        try {
+          const res = await fetch(DATA_URL, { cache: 'no-store' });
+          if (!res.ok) throw new Error('Failed to fetch exhibits');
+          return await res.json();
+        } catch (e) {
+          console.warn('Loading DATA_URL failed, falling back to sample exhibits.', e);
+        }
+      }
+      return SAMPLE_EXHIBITS;
+    }
+
+    function addExhibits(geojson){
+      // Source
+      map.addSource('exhibits', {
+        type: 'geojson',
+        data: geojson,
+        cluster: !!CLUSTER_POINTS,
+        clusterRadius: 50,
+        clusterMaxZoom: 18
+      });
+
+      if (CLUSTER_POINTS) {
+        // Cluster circles
+        map.addLayer({
+          id: 'exhibits-clusters',
+          type: 'circle',
+          source: 'exhibits',
+          filter: ['has', 'point_count'],
+          paint: {
+            'circle-color': ['step', ['get', 'point_count'], '#f48fb1', 10, '#f06292', 50, '#e91e63'],
+            'circle-radius': ['step', ['get', 'point_count'], 16, 10, 20, 50, 26]
+          }
+        });
+        // Cluster count labels
+        map.addLayer({
+          id: 'exhibits-cluster-count',
+          type: 'symbol',
+          source: 'exhibits',
+          filter: ['has', 'point_count'],
+          layout: {
+            'text-field': ['to-string', ['get', 'point_count']],
+            'text-size': 12
+          },
+          paint: { 'text-color': '#fff' }
+        });
+      }
+
+      // Unclustered points
+      map.addLayer({
+        id: 'exhibits-points',
+        type: 'circle',
+        source: 'exhibits',
+        filter: CLUSTER_POINTS ? ['!', ['has', 'point_count']] : undefined,
+        paint: {
+          'circle-color': EXHIBIT_COLOR,
+          'circle-radius': 7,
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#fff'
+        }
+      });
+
+      // Click handling
+      map.on('click', 'exhibits-clusters', (e) => {
+        const features = map.queryRenderedFeatures(e.point, { layers: ['exhibits-clusters'] });
+        const clusterId = features[0].properties.cluster_id;
+        map.getSource('exhibits').getClusterExpansionZoom(clusterId, (err, zoom) => {
+          if (err) return;
+          map.easeTo({ center: features[0].geometry.coordinates, zoom });
+        });
+      });
+
+      map.on('click', 'exhibits-points', (e) => {
+        const f = e.features[0];
+        const p = f.properties ? JSON.parse(JSON.stringify(f.properties)) : {};
+        new maplibregl.Popup({ closeButton: true })
+          .setLngLat(f.geometry.coordinates)
+          .setHTML(popupHtml(p))
+          .addTo(map);
+      });
+
+      map.on('mouseenter', 'exhibits-points', () => map.getCanvas().style.cursor = 'pointer');
+      map.on('mouseleave', 'exhibits-points', () => map.getCanvas().style.cursor = '');
+    }
+
+    function flyToData(geojson){
+      try {
+        const coords = geojson.features.map(f => f.geometry.coordinates);
+        const lons = coords.map(c => c[0]);
+        const lats = coords.map(c => c[1]);
+        const minX = Math.min(...lons), maxX = Math.max(...lons);
+        const minY = Math.min(...lats), maxY = Math.max(...lats);
+        map.fitBounds([[minX, minY], [maxX, maxY]], { padding: 30, maxZoom: 16 });
+      } catch (e) {
+        // fallback
+        map.setCenter([-97.1384, 49.8951]);
+        map.setZoom(13);
+      }
+    }
+
+    // Deep link: index.html?q=Projection
+    function handleDeepLink(){
+      const params = new URLSearchParams(location.search);
+      const q = params.get('q');
+      if (!q) return;
+      const src = map.getSource('exhibits');
+      if (!src || !src._data) return;
+      const feat = src._data.features.find(f => JSON.stringify(f.properties).toLowerCase().includes(q.toLowerCase()));
+      if (feat) {
+        map.easeTo({ center: feat.geometry.coordinates, zoom: 16 });
+        new maplibregl.Popup({ closeButton: true })
+          .setLngLat(feat.geometry.coordinates)
+          .setHTML(popupHtml(feat.properties||{}))
+          .addTo(map);
+      }
+    }
+
+    createMap();
+  </script>
+</body>
+</html>
